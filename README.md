@@ -1,6 +1,11 @@
 # MBG Scraper — Sentiment Analysis Pipeline
 
-Scrape artikel Kompas.com tentang program **Makan Bergizi Gratis (MBG)** dari dua tag source, klasifikasi sentimen berbasis aturan (rule-based), dan output ke daily log markdown.
+Scrape artikel Kompas.com tentang program **Makan Bergizi Gratis (MBG)** dari dua tag source, klasifikasi sentimen, dan output ke daily log markdown.
+
+Tersedia **3 classifier mode** yang bisa dipilih sesuai kebutuhan:
+- **`rule`** — berbasis keyword (cepat, offline, tanpa GPU)
+- **`local`** — local LLM (Ollama, vLLM, LM Studio) — configurable endpoint + model
+- **`hermes`** — via Hermes agent CLI
 
 ---
 
@@ -23,12 +28,11 @@ graph TD
         B2 --> B3
     end
 
-    subgraph Step2["2️⃣ Classify (rules_classifier.py)"]
-        C["classify_article()"]
-        C1["Keyword matching<br>POSITIF_WORDS / NETRAL_WORDS / NEGATIF_WORDS"]
-        C2["Sentiment label output"]
-        C --> C1
-        C1 --> C2
+    subgraph Step2["2️⃣ Classify"]
+        direction LR
+        C1["rules_classifier.py<br>keyword matching"]:::branch
+        C2["llm_classifier.py --mode local<br>local LLM endpoint"]:::branch
+        C3["llm_classifier.py --mode hermes<br>Hermes agent CLI"]:::branch
     end
 
     subgraph Step3["3️⃣ Format Log (classifier.py)"]
@@ -51,8 +55,8 @@ graph TD
 
     A1 --> B
     A2 --> B
-    B3 --> C
-    C2 --> D
+    B3 --> Step2
+    Step2 --> D
     D3 --> E1
     D4 --> E2
     B3 -.-> E3
@@ -65,10 +69,12 @@ graph TD
 ```
 mbg-scraper/
 ├── scraper.py              # Scraper — fetch tag pages + article bodies
-├── rules_classifier.py     # Rule-based sentiment classifier
+├── rules_classifier.py     # Rule-based sentiment classifier (default)
+├── llm_classifier.py       # LLM-based classifier (local / Hermes modes)
 ├── classifier.py           # Log formatter — markdown output + summary
 ├── run.sh                  # Pipeline orchestrator
 ├── requirements.txt        # Python dependencies
+├── .env.example            # LLM configuration template
 ├── README.md               # This file
 │
 ├── log/                    # Daily sentiment log output
@@ -146,6 +152,42 @@ python3 rules_classifier.py articles.json --output classified.json
 
 ---
 
+### `llm_classifier.py` — LLM Classifier
+
+Classifies articles using an LLM instead of keyword rules. Two modes:
+
+| Mode | Description | Configuration |
+|------|-------------|---------------|
+| `local` | Calls any OpenAI-compatible LLM API (Ollama, vLLM, LM Studio) | `MBG_LLM_URL`, `MBG_LLM_MODEL` env vars |
+| `hermes` | Calls Hermes agent CLI (`hermes run`) | `MBG_HERMES_PROFILE` env var (optional) |
+
+CLI interface identical to `rules_classifier.py`:
+```bash
+# Local LLM (Ollama default: http://localhost:11434/api/generate, llama3.2)
+python3 llm_classifier.py articles.json --mode local --output classified.json
+
+# Hermes agent CLI
+python3 llm_classifier.py articles.json --mode hermes --output classified.json
+```
+
+**Configuration via `.env`:**
+```bash
+# Copy template and edit
+cp .env.example .env
+
+# Local LLM endpoint
+MBG_LLM_URL=http://localhost:11434/api/generate
+MBG_LLM_MODEL=llama3.2
+MBG_LLM_TIMEOUT=60
+
+# Hermes profile (optional)
+# MBG_HERMES_PROFILE=my-profile
+```
+
+System prompt instructs the LLM to output a JSON array of `{"sentiment": "positif|netral|negatif"}`. Each article is sent with title + first 1000 chars of body.
+
+---
+
 ### `classifier.py` — Log Formatter
 
 Formats classified articles into daily markdown log files and generates a Telegram-ready summary.
@@ -183,11 +225,20 @@ python3 classifier.py classified.json --stdout
 Runs the full pipeline: **scrape → classify → log** sequentially.
 
 ```bash
-# Incremental (latest page only)
+# Incremental, rule-based classifier (default)
 ./run.sh
 
-# Full backfill from Jan 1
+# Full backfill from Jan 1, rule-based
 ./run.sh --backfill
+
+# Use local LLM (Ollama/vLLM) — configure via .env
+./run.sh --classifier local
+
+# Use Hermes agent CLI
+./run.sh --classifier hermes
+
+# Backfill + Hermes
+./run.sh --backfill --classifier hermes
 ```
 
 The Telegram-formatted summary is automatically printed to stdout at the end.
@@ -258,9 +309,17 @@ TAGS = [
 
 ---
 
+## Classifier Selection Guide
+
+| Mode | Accuracy | Speed | Requirements |
+|------|----------|-------|-------------|
+| `rule` | Moderate (keyword-based) | ⚡ Instant | None |
+| `local` | High (LLM understanding) | 🐢 Depends on GPU/CPU | Ollama / vLLM / LM Studio running |
+| `hermes` | High (LLM understanding) | 🐢 Depends on Hermes provider | Hermes CLI installed |
+
 ## Key Design Decisions
 
-- **No LLM classification** — rule-based keyword matching for speed, offline use, and reproducibility
+- **3 classifier modes** — `rule` (keyword, instant), `local` (configurable LLM endpoint), `hermes` (Hermes CLI). Pick what fits your compute
 - **Body fetch is default** — Kompas tag pages don't provide article lead/snippet text; only category labels
 - **JS widget cleanup** — Kompas.id inline recommender JS (`var endpoint ... xhr.send()`) stripped from body text
 - **Unknown URL tracking** — `known_urls.json` enables incremental runs without re-fetching known articles
