@@ -2,9 +2,10 @@
 
 Scrape artikel Kompas.com tentang program **Makan Bergizi Gratis (MBG)** dari dua tag source, klasifikasi sentimen, dan output ke daily log markdown.
 
-Tersedia **3 classifier mode** yang bisa dipilih sesuai kebutuhan:
+Tersedia **4 classifier mode** yang bisa dipilih sesuai kebutuhan:
 - **`rule`** — berbasis keyword (cepat, offline, tanpa GPU)
-- **`local`** — local LLM (Ollama, vLLM, LM Studio) — configurable endpoint + model
+- **`local`** — LLM via API (vLLM, Ollama, LM Studio) — configurable endpoint + model
+- **`local-model`** — HuggingFace pipeline langsung via PyTorch (GPU/CPU)
 - **`hermes`** — via Hermes agent CLI
 
 ---
@@ -30,9 +31,10 @@ graph TD
 
     subgraph Step2["2️⃣ Classify"]
         direction LR
-        C1["rules_classifier.py<br>keyword matching"]:::branch
-        C2["llm_classifier.py --mode local<br>local LLM endpoint"]:::branch
-        C3["llm_classifier.py --mode hermes<br>Hermes agent CLI"]:::branch
+        C1["rules_classifier.py<br>keyword matching"]
+        C2["llm_classifier.py --mode local<br>LLM API (vLLM/Ollama)"]
+        C3["llm_classifier.py --mode local-model<br>HF pipeline (PyTorch)"]
+        C4["llm_classifier.py --mode hermes<br>Hermes agent CLI"]
     end
 
     subgraph Step3["3️⃣ Format Log (classifier.py)"]
@@ -154,17 +156,21 @@ python3 rules_classifier.py articles.json --output classified.json
 
 ### `llm_classifier.py` — LLM Classifier
 
-Classifies articles using an LLM instead of keyword rules. Two modes:
+Classifies articles using an LLM instead of keyword rules. Three modes:
 
 | Mode | Description | Configuration |
 |------|-------------|---------------|
-| `local` | Calls any OpenAI-compatible LLM API (Ollama, vLLM, LM Studio) | `MBG_LLM_URL`, `MBG_LLM_MODEL` env vars |
+| `local` | Calls any OpenAI-compatible LLM API (vLLM, Ollama, LM Studio) | `MBG_LLM_URL`, `MBG_LLM_MODEL` env vars |
+| `local-model` | Runs HuggingFace pipeline directly via PyTorch (GPU/CPU) | `MBG_HF_MODEL`, `MBG_HF_DEVICE` env vars |
 | `hermes` | Calls Hermes agent CLI (`hermes run`) | `MBG_HERMES_PROFILE` env var (optional) |
 
-CLI interface identical to `rules_classifier.py`:
+**CLI:**
 ```bash
-# Local LLM (Ollama default: http://localhost:11434/api/generate, llama3.2)
+# Local LLM via API (vLLM/Ollama)
 python3 llm_classifier.py articles.json --mode local --output classified.json
+
+# HuggingFace pipeline (pytorch) — uses nahiar/sentiment-analysis-v2 by default
+python3 llm_classifier.py articles.json --mode local-model --output classified.json
 
 # Hermes agent CLI
 python3 llm_classifier.py articles.json --mode hermes --output classified.json
@@ -175,16 +181,26 @@ python3 llm_classifier.py articles.json --mode hermes --output classified.json
 # Copy template and edit
 cp .env.example .env
 
-# Local LLM endpoint
-MBG_LLM_URL=http://localhost:11434/api/generate
-MBG_LLM_MODEL=llama3.2
-MBG_LLM_TIMEOUT=60
+# ── HuggingFace Pipeline (local-model) ──
+MBG_HF_MODEL=nahiar/sentiment-analysis-v2
+MBG_HF_DEVICE=cuda         # "cuda" or "cpu"
+MBG_HF_BATCH_SIZE=32
 
-# Hermes profile (optional)
+# ── API-based LLM (local) ──
+MBG_LLM_URL=http://localhost:8000/v1/chat/completions
+MBG_LLM_MODEL=Qwen/Qwen3.5-35B-A3B-GPTQ-Int4
+MBG_LLM_TIMEOUT=120
+MBG_LLM_MAX_TOKENS=8192
+
+# ── Hermes ──
 # MBG_HERMES_PROFILE=my-profile
 ```
 
-System prompt instructs the LLM to output a JSON array of `{"sentiment": "positif|netral|negatif"}`. Each article is sent with title + first 1000 chars of body.
+**Mode details:**
+
+- **`local`** — Sends articles as a batch prompt to an OpenAI-compatible API. Auto-detects API type (`/v1/chat/completions`, `/v1/completions`, Ollama `/api/generate`). Handles reasoning models with JSON array fallback extraction.
+- **`local-model`** — Loads a HuggingFace `text-classification` pipeline. Supports any HF sentiment model. Pipeline is cached after first load. Batch inference with configurable batch size. Runs on GPU (`cuda`) or CPU.
+- **`hermes`** — Delegates classification to Hermes agent CLI. Useful when running within the Hermes ecosystem.
 
 ---
 
@@ -231,14 +247,17 @@ Runs the full pipeline: **scrape → classify → log** sequentially.
 # Full backfill from Jan 1, rule-based
 ./run.sh --backfill
 
-# Use local LLM (Ollama/vLLM) — configure via .env
+# Use vLLM/Ollama API — configure via .env
 ./run.sh --classifier local
+
+# Use HuggingFace pipeline (nahiar/sentiment-analysis-v2 + PyTorch)
+./run.sh --classifier local-model
+
+# Backfill + HF pipeline
+./run.sh --backfill --classifier local-model
 
 # Use Hermes agent CLI
 ./run.sh --classifier hermes
-
-# Backfill + Hermes
-./run.sh --backfill --classifier hermes
 ```
 
 The Telegram-formatted summary is automatically printed to stdout at the end.
@@ -270,7 +289,12 @@ pip install -r requirements.txt
 Create `requirements.txt`:
 
 ```txt
+# Core
 requests>=2.28.0
+
+# HuggingFace pipeline (for --classifier local-model)
+transformers>=4.44.0
+torch>=2.0.0
 ```
 
 ---
@@ -314,12 +338,13 @@ TAGS = [
 | Mode | Accuracy | Speed | Requirements |
 |------|----------|-------|-------------|
 | `rule` | Moderate (keyword-based) | ⚡ Instant | None |
-| `local` | High (LLM understanding) | 🐢 Depends on GPU/CPU | Ollama / vLLM / LM Studio running |
-| `hermes` | High (LLM understanding) | 🐢 Depends on Hermes provider | Hermes CLI installed |
+| `local` | High (LLM) | 🐢 Depends on GPU | vLLM / Ollama / LM Studio running |
+| `local-model` | High (fine-tuned model) | ⚡ Fast (GPU) | PyTorch + transformers |
+| `hermes` | High (LLM) | 🐢 Depends on provider | Hermes CLI installed |
 
 ## Key Design Decisions
 
-- **3 classifier modes** — `rule` (keyword, instant), `local` (configurable LLM endpoint), `hermes` (Hermes CLI). Pick what fits your compute
+- **4 classifier modes** — `rule` (keyword), `local` (API endpoint), `local-model` (HF pipeline), `hermes` (Hermes CLI). Pick what fits your compute
 - **Body fetch is default** — Kompas tag pages don't provide article lead/snippet text; only category labels
 - **JS widget cleanup** — Kompas.id inline recommender JS (`var endpoint ... xhr.send()`) stripped from body text
 - **Unknown URL tracking** — `known_urls.json` enables incremental runs without re-fetching known articles
