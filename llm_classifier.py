@@ -38,14 +38,19 @@ Classify each article as one of:
 - "netral" — neutral, factual reporting without clear stance
 - "negatif" — criticizes/opposes or reports problems with the MBG program
 
-Output ONLY a JSON array, one object per article, in the SAME ORDER as input:
+Rules:
+- Do NOT think step by step. Output ONLY valid JSON.
+- Do NOT include any reasoning, thinking, or explanation.
+- Do NOT use markdown code blocks.
+
+Output a JSON array in the EXACT same order as the input articles:
 [
-  {"sentiment": "positif|netral|negatif"},
-  {"sentiment": "positif|netral|negatif"},
-  ...
+  {"sentiment": "positif"},
+  {"sentiment": "netral"},
+  {"sentiment": "negatif"}
 ]
 
-No explanations, no markdown, no extra text — just the JSON array."""
+Output ONLY the JSON array — nothing else before or after it."""
 
 
 def build_user_prompt(articles):
@@ -150,7 +155,17 @@ def classify_local_llm(articles):
                 f"Choice keys: {list(choices[0].keys()) if choices else 'N/A'}"
             )
 
-        results = json.loads(raw)
+        # Try to parse JSON array directly
+        try:
+            results = json.loads(raw)
+        except json.JSONDecodeError:
+            # Fallback: find JSON array [...] in response (handles thinking/reasoning models)
+            import re
+            json_match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
+            if json_match:
+                results = json.loads(json_match.group())
+            else:
+                raise
 
         if not isinstance(results, list):
             raise ValueError(f"Expected JSON array, got {type(results).__name__}")
