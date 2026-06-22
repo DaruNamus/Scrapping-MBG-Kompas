@@ -79,6 +79,9 @@ mbg-scraper/
 ├── .env.example            # LLM configuration template
 ├── README.md               # This file
 │
+├── docs/                   # Documentation
+│   └── classifier-parameters.md  # Detailed sentiment parameter reference
+│
 ├── log/                    # Daily sentiment log output
 │   ├── 2026-06-22.md
 │   ├── 2026-06-21.md
@@ -341,6 +344,8 @@ TAGS = [
 | `local` | High (LLM) | 🐢 Depends on GPU | vLLM / Ollama / LM Studio running |
 | `local-model` | High (fine-tuned model) | ⚡ Fast (GPU) | PyTorch + transformers |
 | `hermes` | High (LLM) | 🐢 Depends on provider | Hermes CLI installed |
+
+📖 **Detailed parameter reference:** [`docs/classifier-parameters.md`](docs/classifier-parameters.md) — Full breakdown of system prompt, engine params, post-processing, and tuning recommendations for each classifier mode.
 
 ## Key Design Decisions
 
