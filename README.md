@@ -2,8 +2,6 @@
 
 Scrape artikel Kompas.com tentang program **Makan Bergizi Gratis (MBG)** dari dua tag source, klasifikasi sentimen berbasis aturan (rule-based), dan output ke daily log markdown.
 
-> **⚠️ Proyek ini independen** — tidak terhubung dengan vault Obsidian Maewino/Management atau sistem lainnya.
-
 ---
 
 ## Pipeline Diagram
