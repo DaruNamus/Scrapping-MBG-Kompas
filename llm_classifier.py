@@ -33,7 +33,6 @@ MAX_TOKENS = int(os.environ.get("MBG_LLM_MAX_TOKENS", "8192"))
 HF_MODEL_NAME = os.environ.get("MBG_HF_MODEL", "nahiar/sentiment-analysis-v2")
 HF_DEVICE = os.environ.get("MBG_HF_DEVICE", "cuda")      # "cuda" or "cpu"
 HF_BATCH_SIZE = int(os.environ.get("MBG_HF_BATCH_SIZE", "8"))   # smaller default for large models
-HF_FALLBACK_CPU = os.environ.get("MBG_HF_FALLBACK_CPU", "true").lower() in ("1", "true", "yes")
 
 # Hermes LLM config
 HERMES_PROFILE = os.environ.get("MBG_HERMES_PROFILE", "")
@@ -224,26 +223,9 @@ def classify_local_model(articles):
             )
             print(f"[LOCAL-MODEL] Pipeline ready on {device}.", file=sys.stderr)
         except Exception as e:
-            if HF_FALLBACK_CPU and device != "cpu":
-                print(f"[WARN] GPU failed ({e}), falling back to cpu...",
-                      file=sys.stderr)
-                device = "cpu"
-                try:
-                    _hf_pipeline = pipeline(
-                        "text-classification",
-                        model=HF_MODEL_NAME,
-                        device="cpu",
-                    )
-                    print(f"[LOCAL-MODEL] Pipeline ready on cpu (fallback).",
-                          file=sys.stderr)
-                except Exception as e2:
-                    print(f"[ERROR] Failed to load model {HF_MODEL_NAME} on cpu too: {e2}",
-                          file=sys.stderr)
-                    return None
-            else:
-                print(f"[ERROR] Failed to load model {HF_MODEL_NAME}: {e}",
-                      file=sys.stderr)
-                return None
+            print(f"[ERROR] Failed to load model {HF_MODEL_NAME}: {e}",
+                  file=sys.stderr)
+            return None
 
     # Build text inputs: "Title: ... Content: ..."
     texts = []
