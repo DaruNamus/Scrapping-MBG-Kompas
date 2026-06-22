@@ -31,26 +31,7 @@ HERMES_PROFILE = os.environ.get("MBG_HERMES_PROFILE", "")
 
 # ── Shared prompt template ───────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a sentiment classifier for Indonesian news articles about the MBG (Makan Bergizi Gratis / Free Nutritious Meal) program in Indonesia.
-
-Classify each article as one of:
-- "positif" — supports/is positive toward the MBG program
-- "netral" — neutral, factual reporting without clear stance
-- "negatif" — criticizes/opposes or reports problems with the MBG program
-
-Rules:
-- Do NOT think step by step. Output ONLY valid JSON.
-- Do NOT include any reasoning, thinking, or explanation.
-- Do NOT use markdown code blocks.
-
-Output a JSON array in the EXACT same order as the input articles:
-[
-  {"sentiment": "positif"},
-  {"sentiment": "netral"},
-  {"sentiment": "negatif"}
-]
-
-Output ONLY the JSON array — nothing else before or after it."""
+SYSTEM_PROMPT = "Classify sentiment (positif, netral, negatif) for MBG articles. Output JSON array: [{\"sentiment\": \"...\"}, ...]. No thinking, no markdown, no explanation. ONLY the JSON array."
 
 
 def build_user_prompt(articles):
@@ -121,6 +102,13 @@ def classify_local_llm(articles):
             "format": "json",
         }
 
+    # Set max_tokens from env (allow override via .env)
+    max_tokens_env = os.environ.get("MBG_LLM_MAX_TOKENS", "8192")
+    if "max_tokens" not in payload:
+        payload["max_tokens"] = int(max_tokens_env)
+    else:
+        payload["max_tokens"] = max(payload["max_tokens"], int(max_tokens_env))
+
     try:
         resp = requests.post(
             LOCAL_LLM_URL,
@@ -161,9 +149,16 @@ def classify_local_llm(articles):
         except json.JSONDecodeError:
             # Fallback: find JSON array [...] in response (handles thinking/reasoning models)
             import re
-            json_match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
+            # Match JSON array: [{...}, {...}, ...]
+            json_match = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
+            if not json_match:
+                # Also try matching individual JSON lines
+                json_match = re.search(r'\[.*?\]', raw, re.DOTALL)
             if json_match:
-                results = json.loads(json_match.group())
+                try:
+                    results = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    raise
             else:
                 raise
 
