@@ -5,6 +5,9 @@ known_urls.json
 log/*.md
 log/*.txt
 
+# Obsidian
+.obsidian/
+
 # Python
 __pycache__/
 *.pyc
