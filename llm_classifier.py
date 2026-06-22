@@ -94,20 +94,18 @@ def classify_local_llm(articles):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "stream": False,
         }
-        response_key = ("choices", 0, "message", "content")
     elif api_type == "completions":
         full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}\n\nOutput ONLY a JSON array."
         payload = {
             "model": LOCAL_LLM_MODEL,
             "prompt": full_prompt,
             "temperature": 0.1,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "stream": False,
         }
-        response_key = ("choices", 0, "text")
     else:
         # Ollama /api/generate
         payload = {
@@ -117,7 +115,6 @@ def classify_local_llm(articles):
             "stream": False,
             "format": "json",
         }
-        response_key = ("response",)
 
     try:
         resp = requests.post(
@@ -129,17 +126,29 @@ def classify_local_llm(articles):
         resp.raise_for_status()
         data = resp.json()
 
-        # Extract text based on API type
-        raw = data
-        for key in response_key:
-            if isinstance(raw, dict):
-                raw = raw.get(key, "")
-            else:
-                raw = ""
-                break
+        # Flexible response extraction — try multiple paths
+        raw = ""
+        choices = data.get("choices", [])
+        if choices:
+            choice = choices[0]
+            # Try message.content (chat format)
+            msg = choice.get("message", {})
+            if isinstance(msg, dict):
+                raw = msg.get("content", "")
+            # Try .text (completions format)
+            if not raw:
+                raw = choice.get("text", "")
+
+        # Ollama fallback
+        if not raw:
+            raw = data.get("response", "")
 
         if not raw:
-            raise ValueError(f"Could not extract response text. Keys: {list(data.keys())}")
+            raise ValueError(
+                f"Could not extract response text. "
+                f"Keys: {list(data.keys())}, "
+                f"Choice keys: {list(choices[0].keys()) if choices else 'N/A'}"
+            )
 
         results = json.loads(raw)
 
@@ -153,7 +162,16 @@ def classify_local_llm(articles):
         return None
     except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
         print(f"[ERROR] Local LLM response parse failed: {e}", file=sys.stderr)
-        print(f"  Raw response snippet: {raw[:300] if 'raw' in dir() else 'N/A'}", file=sys.stderr)
+        print(f"  Raw response snippet: {raw[:500] if 'raw' in dir() else 'N/A'}", file=sys.stderr)
+        # Debug: print full response for diagnosis
+        if 'data' in dir():
+            import pprint
+            print(f"  Full response keys: {list(data.keys())}", file=sys.stderr)
+            if 'choices' in data and data['choices']:
+                c = data['choices'][0]
+                print(f"  Choice[0] type: {type(c).__name__}, keys: {list(c.keys()) if isinstance(c, dict) else 'N/A'}", file=sys.stderr)
+                if isinstance(c, dict) and 'logprobs' in c:
+                    print(f"  Choice has logprobs", file=sys.stderr)
         return None
 
 
