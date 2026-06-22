@@ -19,12 +19,11 @@ from datetime import datetime
 import requests
 
 
-# ── Configuration via environment variables ──────────────────────────────
+# ── Local LLM config ─────────────────────────────────────────────────────
 
-# Local LLM config
-LOCAL_LLM_URL = os.environ.get("MBG_LLM_URL", "http://localhost:11434/api/generate")
-LOCAL_LLM_MODEL = os.environ.get("MBG_LLM_MODEL", "llama3.2")
-LOCAL_LLM_TIMEOUT = int(os.environ.get("MBG_LLM_TIMEOUT", "60"))
+LOCAL_LLM_URL = os.environ.get("MBG_LLM_URL", "http://localhost:8000/v1/completions")
+LOCAL_LLM_MODEL = os.environ.get("MBG_LLM_MODEL", "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4")
+LOCAL_LLM_TIMEOUT = int(os.environ.get("MBG_LLM_TIMEOUT", "120"))
 
 # Hermes LLM config
 HERMES_PROFILE = os.environ.get("MBG_HERMES_PROFILE", "")
@@ -63,29 +62,85 @@ def build_user_prompt(articles):
 
 # ── Local LLM mode ──────────────────────────────────────────────────────
 
-def classify_local_llm(articles):
-    """Classify via local LLM endpoint (Ollama-compatible API)."""
-    prompt = build_user_prompt(articles)
+def _detect_api_type(url):
+    """Detect API type from URL path."""
+    if "/chat/completions" in url:
+        return "chat"
+    elif "/completions" in url:
+        return "completions"
+    elif "/api/generate" in url:
+        return "generate"
+    elif "/api/chat" in url:
+        return "chat"
+    return "generate"  # default fallback
 
-    payload = {
-        "model": LOCAL_LLM_MODEL,
-        "system": SYSTEM_PROMPT,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-    }
+
+def classify_local_llm(articles):
+    """Classify via local LLM endpoint.
+    Supports:
+      - Ollama /api/generate (default fallback)
+      - OpenAI-compatible /v1/chat/completions (vLLM, LM Studio, etc.)
+      - OpenAI-compatible /v1/completions (legacy)
+    """
+    prompt = build_user_prompt(articles)
+    api_type = _detect_api_type(LOCAL_LLM_URL)
+
+    # Build payload based on API type
+    if api_type == "chat":
+        payload = {
+            "model": LOCAL_LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2048,
+            "stream": False,
+        }
+        response_key = ("choices", 0, "message", "content")
+    elif api_type == "completions":
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}\n\nOutput ONLY a JSON array."
+        payload = {
+            "model": LOCAL_LLM_MODEL,
+            "prompt": full_prompt,
+            "temperature": 0.1,
+            "max_tokens": 2048,
+            "stream": False,
+        }
+        response_key = ("choices", 0, "text")
+    else:
+        # Ollama /api/generate
+        payload = {
+            "model": LOCAL_LLM_MODEL,
+            "system": SYSTEM_PROMPT,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+        }
+        response_key = ("response",)
 
     try:
         resp = requests.post(
             LOCAL_LLM_URL,
             json=payload,
             timeout=LOCAL_LLM_TIMEOUT,
+            headers={"Content-Type": "application/json"},
         )
         resp.raise_for_status()
         data = resp.json()
 
-        # Parse response — try response field first (Ollama), then fallback
-        raw = data.get("response", "") or data.get("text", "") or json.dumps(data)
+        # Extract text based on API type
+        raw = data
+        for key in response_key:
+            if isinstance(raw, dict):
+                raw = raw.get(key, "")
+            else:
+                raw = ""
+                break
+
+        if not raw:
+            raise ValueError(f"Could not extract response text. Keys: {list(data.keys())}")
+
         results = json.loads(raw)
 
         if not isinstance(results, list):
@@ -96,8 +151,9 @@ def classify_local_llm(articles):
     except requests.RequestException as e:
         print(f"[ERROR] Local LLM request failed: {e}", file=sys.stderr)
         return None
-    except (json.JSONDecodeError, ValueError, KeyError) as e:
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
         print(f"[ERROR] Local LLM response parse failed: {e}", file=sys.stderr)
+        print(f"  Raw response snippet: {raw[:300] if 'raw' in dir() else 'N/A'}", file=sys.stderr)
         return None
 
 
