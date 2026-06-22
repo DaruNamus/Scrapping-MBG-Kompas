@@ -3,9 +3,10 @@
 # Usage:
 #   ./run.sh                               # Incremental, rule-based classifier
 #   ./run.sh --backfill                     # Full backfill, rule-based
-#   ./run.sh --classifier local             # Incremental, local LLM
+#   ./run.sh --classifier local             # Incremental, vLLM/Ollama API
+#   ./run.sh --classifier local-model       # Incremental, HuggingFace pipeline
 #   ./run.sh --classifier hermes            # Incremental, Hermes LLM
-#   ./run.sh --backfill --classifier hermes # Backfill, Hermes LLM
+#   ./run.sh --backfill --classifier local-model  # Backfill, HF pipeline
 
 set -e
 
@@ -23,7 +24,7 @@ mkdir -p "$TMP_DIR" "$LOG_DIR"
 # ── Parse arguments ──────────────────────────────────────────────────────
 
 BACKFILL=""
-CLASSIFIER_MODE="rule"  # rule | local | hermes
+CLASSIFIER_MODE="rule"  # rule | local | local-model | hermes
 
 for arg in "$@"; do
     case "$arg" in
@@ -79,12 +80,12 @@ case "$CLASSIFIER_MODE" in
     rule)
         python3 "$RULES_CLASSIFIER" "$SCRAPE_OUT" --output "$CLASSIFIED_OUT"
         ;;
-    local|hermes)
+    local|local-model|hermes)
         python3 "$LLM_CLASSIFIER" "$SCRAPE_OUT" --mode "$CLASSIFIER_MODE" --output "$CLASSIFIED_OUT"
         ;;
     *)
         echo "[ERROR] Unknown classifier mode: $CLASSIFIER_MODE"
-        echo "  Valid: rule | local | hermes"
+        echo "  Valid: rule | local | local-model | hermes"
         exit 1
         ;;
 esac

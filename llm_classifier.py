@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-MBG LLM Classifier — Classify articles as positif/netral/negatif using an LLM.
-Two modes:
-  1. Local LLM: configurable endpoint (Ollama, vLLM, etc.) via env vars
-  2. Hermes LLM: calls Hermes agent CLI for classification
+MBG LLM Classifier — Classify articles as positif/netral/negatif.
+Three modes:
+  1. local: any OpenAI-compatible API (vLLM, Ollama, LM Studio)
+  2. local-model: direct HuggingFace transformers pipeline (pytorch)
+  3. hermes: calls Hermes agent CLI
 
 Interface identical to rules_classifier.py — just swap the script.
 """
@@ -11,6 +12,7 @@ Interface identical to rules_classifier.py — just swap the script.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -19,20 +21,24 @@ from datetime import datetime
 import requests
 
 
-# ── Local LLM config ─────────────────────────────────────────────────────
+# ── Configuration via environment variables ──────────────────────────────
 
+# API-based LLM config
 LOCAL_LLM_URL = os.environ.get("MBG_LLM_URL", "http://localhost:8000/v1/completions")
 LOCAL_LLM_MODEL = os.environ.get("MBG_LLM_MODEL", "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4")
 LOCAL_LLM_TIMEOUT = int(os.environ.get("MBG_LLM_TIMEOUT", "120"))
+MAX_TOKENS = int(os.environ.get("MBG_LLM_MAX_TOKENS", "8192"))
+
+# HuggingFace model config (for local-model mode)
+HF_MODEL_NAME = os.environ.get("MBG_HF_MODEL", "nahiar/sentiment-analysis-v2")
+HF_DEVICE = os.environ.get("MBG_HF_DEVICE", "cuda")      # "cuda" or "cpu"
+HF_BATCH_SIZE = int(os.environ.get("MBG_HF_BATCH_SIZE", "32"))
 
 # Hermes LLM config
 HERMES_PROFILE = os.environ.get("MBG_HERMES_PROFILE", "")
 
 
-# ── Shared prompt template ───────────────────────────────────────────────
-
-SYSTEM_PROMPT = "Classify sentiment (positif, netral, negatif) for MBG articles. Output JSON array: [{\"sentiment\": \"...\"}, ...]. No thinking, no markdown, no explanation. ONLY the JSON array."
-
+# ── Shared helpers ─────────────────────────────────────────────────────
 
 def build_user_prompt(articles):
     """Build user prompt from list of article dicts."""
@@ -46,10 +52,57 @@ def build_user_prompt(articles):
     return "\n".join(parts)
 
 
-# ── Local LLM mode ──────────────────────────────────────────────────────
+SYSTEM_PROMPT = "Classify sentiment (positif, netral, negatif) for MBG articles. Output JSON array: [{\"sentiment\": \"...\"}, ...]. No thinking, no markdown, no explanation. ONLY the JSON array."
+
+
+def extract_json_array(text):
+    """Try to find and parse a JSON array anywhere in text."""
+    # Direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Find [...] in text
+    m = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+    if not m:
+        m = re.search(r'\[.*?\]', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def apply_sentiments(articles, results):
+    """Apply sentiment labels from results list to articles list."""
+    if len(results) != len(articles):
+        print(f"[WARN] Expected {len(articles)} results, got {len(results)}. "
+              f"Padding/truncating.", file=sys.stderr)
+        while len(results) < len(articles):
+            results.append({"sentiment": "netral"})
+        results = results[:len(articles)]
+    for a, r in zip(articles, results):
+        sentiment = r.get("sentiment", "netral")
+        if sentiment not in ("positif", "netral", "negatif"):
+            sentiment = "netral"
+        a["sentiment"] = sentiment
+    return articles
+
+
+def build_output(articles, method, model_name):
+    return {
+        "classified_at": datetime.now().isoformat(),
+        "method": method,
+        "model": model_name,
+        "total_articles": len(articles),
+        "articles": articles,
+    }
+
+
+# ── Mode 1: Local LLM via API (vLLM / Ollama / LM Studio) ───────────────
 
 def _detect_api_type(url):
-    """Detect API type from URL path."""
     if "/chat/completions" in url:
         return "chat"
     elif "/completions" in url:
@@ -58,20 +111,14 @@ def _detect_api_type(url):
         return "generate"
     elif "/api/chat" in url:
         return "chat"
-    return "generate"  # default fallback
+    return "generate"
 
 
 def classify_local_llm(articles):
-    """Classify via local LLM endpoint.
-    Supports:
-      - Ollama /api/generate (default fallback)
-      - OpenAI-compatible /v1/chat/completions (vLLM, LM Studio, etc.)
-      - OpenAI-compatible /v1/completions (legacy)
-    """
+    """Classify via OpenAI-compatible API (vLLM, Ollama, LM Studio)."""
     prompt = build_user_prompt(articles)
     api_type = _detect_api_type(LOCAL_LLM_URL)
 
-    # Build payload based on API type
     if api_type == "chat":
         payload = {
             "model": LOCAL_LLM_MODEL,
@@ -80,7 +127,7 @@ def classify_local_llm(articles):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 4096,
+            "max_tokens": MAX_TOKENS,
             "stream": False,
         }
     elif api_type == "completions":
@@ -89,7 +136,7 @@ def classify_local_llm(articles):
             "model": LOCAL_LLM_MODEL,
             "prompt": full_prompt,
             "temperature": 0.1,
-            "max_tokens": 4096,
+            "max_tokens": MAX_TOKENS,
             "stream": False,
         }
     else:
@@ -101,13 +148,8 @@ def classify_local_llm(articles):
             "stream": False,
             "format": "json",
         }
-
-    # Set max_tokens from env (allow override via .env)
-    max_tokens_env = os.environ.get("MBG_LLM_MAX_TOKENS", "8192")
-    if "max_tokens" not in payload:
-        payload["max_tokens"] = int(max_tokens_env)
-    else:
-        payload["max_tokens"] = max(payload["max_tokens"], int(max_tokens_env))
+        if "max_tokens" not in payload:
+            payload["max_tokens"] = MAX_TOKENS
 
     try:
         resp = requests.post(
@@ -119,73 +161,130 @@ def classify_local_llm(articles):
         resp.raise_for_status()
         data = resp.json()
 
-        # Flexible response extraction — try multiple paths
+        # Extract text
         raw = ""
         choices = data.get("choices", [])
         if choices:
-            choice = choices[0]
-            # Try message.content (chat format)
-            msg = choice.get("message", {})
+            c = choices[0]
+            msg = c.get("message", {})
             if isinstance(msg, dict):
                 raw = msg.get("content", "")
-            # Try .text (completions format)
             if not raw:
-                raw = choice.get("text", "")
-
-        # Ollama fallback
+                raw = c.get("text", "")
         if not raw:
             raw = data.get("response", "")
 
         if not raw:
-            raise ValueError(
-                f"Could not extract response text. "
-                f"Keys: {list(data.keys())}, "
-                f"Choice keys: {list(choices[0].keys()) if choices else 'N/A'}"
-            )
+            raise ValueError(f"Cannot extract response. Keys: {list(data.keys())}")
 
-        # Try to parse JSON array directly
-        try:
-            results = json.loads(raw)
-        except json.JSONDecodeError:
-            # Fallback: find JSON array [...] in response (handles thinking/reasoning models)
-            import re
-            # Match JSON array: [{...}, {...}, ...]
-            json_match = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
-            if not json_match:
-                # Also try matching individual JSON lines
-                json_match = re.search(r'\[.*?\]', raw, re.DOTALL)
-            if json_match:
-                try:
-                    results = json.loads(json_match.group())
-                except json.JSONDecodeError:
-                    raise
-            else:
-                raise
-
-        if not isinstance(results, list):
-            raise ValueError(f"Expected JSON array, got {type(results).__name__}")
-
+        results = extract_json_array(raw)
+        if results is None or not isinstance(results, list):
+            raise ValueError(f"No valid JSON array in response: {raw[:300]!r}")
         return results
 
     except requests.RequestException as e:
-        print(f"[ERROR] Local LLM request failed: {e}", file=sys.stderr)
+        print(f"[ERROR] API request failed: {e}", file=sys.stderr)
         return None
     except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
-        print(f"[ERROR] Local LLM response parse failed: {e}", file=sys.stderr)
-        print(f"  Raw response snippet: {raw[:500] if 'raw' in dir() else 'N/A'}", file=sys.stderr)
-        # Debug: print full response for diagnosis
-        if 'data' in dir():
-            import pprint
-            print(f"  Full response keys: {list(data.keys())}", file=sys.stderr)
-            if 'choices' in data and data['choices']:
-                c = data['choices'][0]
-                print(f"  Choice[0] type: {type(c).__name__}, keys: {list(c.keys()) if isinstance(c, dict) else 'N/A'}", file=sys.stderr)
-                if isinstance(c, dict) and 'logprobs' in c:
-                    print(f"  Choice has logprobs", file=sys.stderr)
+        print(f"[ERROR] API response parse failed: {e}", file=sys.stderr)
+        print(f"  Raw: {raw[:500] if 'raw' in dir() else 'N/A'}", file=sys.stderr)
         return None
 
 
-# ── Hermes LLM mode ─────────────────────────────────────────────────────
+# ── Mode 2: Direct HuggingFace pipeline (local-model) ────────────────────
+
+_hf_pipeline = None  # singleton cache
+
+
+def classify_local_model(articles):
+    """Classify via HuggingFace transformers pipeline (pytorch).
+    Uses nahiar/sentiment-analysis-v2 or any HF sentiment model.
+    """
+    global _hf_pipeline
+
+    print(f"[LOCAL-MODEL] Loading {HF_MODEL_NAME} on {HF_DEVICE}...",
+          file=sys.stderr)
+
+    try:
+        from transformers import pipeline
+    except ImportError:
+        print("[ERROR] transformers not installed. Run: pip install transformers torch",
+              file=sys.stderr)
+        return None
+
+    # Lazy-load pipeline (cached after first call)
+    if _hf_pipeline is None:
+        try:
+            _hf_pipeline = pipeline(
+                "text-classification",
+                model=HF_MODEL_NAME,
+                device=HF_DEVICE,
+            )
+            print(f"[LOCAL-MODEL] Pipeline ready.", file=sys.stderr)
+        except Exception as e:
+            print(f"[ERROR] Failed to load model {HF_MODEL_NAME}: {e}",
+                  file=sys.stderr)
+            return None
+
+    # Build text inputs: "Title: ... Content: ..."
+    texts = []
+    for a in articles:
+        title = a.get("title", "")
+        body = (a.get("body", "") or a.get("snippet", "") or "")[:500]
+        texts.append(f"{title}. {body}".strip())
+
+    print(f"[LOCAL-MODEL] Classifying {len(texts)} articles in batches of {HF_BATCH_SIZE}...",
+          file=sys.stderr)
+
+    results = []
+    try:
+        for i in range(0, len(texts), HF_BATCH_SIZE):
+            batch = texts[i:i + HF_BATCH_SIZE]
+            outputs = _hf_pipeline(
+                batch,
+                truncation=True,
+                max_length=512,
+            )
+            results.extend(outputs)
+
+            if (i + len(batch)) % (HF_BATCH_SIZE * 2) == 0 or (i + len(batch)) >= len(texts):
+                print(f"  [{i + len(batch)}/{len(texts)}] classified",
+                      file=sys.stderr)
+
+    except Exception as e:
+        print(f"[ERROR] Classification failed: {e}", file=sys.stderr)
+        return None
+
+    # Map HF labels to MBG labels
+    # nahiar/sentiment-analysis-v2 returns: LABEL_0 = negative, LABEL_1 = neutral, LABEL_2 = positive
+    # But custom models may differ — use dictionary config
+    label_map = {
+        "LABEL_0": "negatif",
+        "LABEL_1": "netral",
+        "LABEL_2": "positif",
+        "NEGATIVE": "negatif",
+        "NEUTRAL": "netral",
+        "POSITIVE": "positif",
+        "negative": "negatif",
+        "neutral": "netral",
+        "positive": "positif",
+    }
+
+    formatted = []
+    for r in results:
+        label = r.get("label", "neutral").upper()
+        if label.startswith("LABEL_"):
+            sent = label_map.get(label, "netral")
+        else:
+            sent = label_map.get(label.upper(), "netral")
+        formatted.append({"sentiment": sent})
+
+    print(f"[LOCAL-MODEL] Done. {len(formatted)} articles classified.",
+          file=sys.stderr)
+    return formatted
+
+
+# ── Mode 3: Hermes CLI ──────────────────────────────────────────────────
 
 def classify_hermes_llm(articles):
     """Classify via Hermes agent CLI (hermes run)."""
@@ -203,22 +302,15 @@ def classify_hermes_llm(articles):
             text=True,
             timeout=LOCAL_LLM_TIMEOUT,
         )
-
         if result.returncode != 0:
             print(f"[ERROR] Hermes CLI failed (exit {result.returncode}): {result.stderr[:500]}", file=sys.stderr)
             return None
 
-        # Parse JSON from output
         output = result.stdout.strip()
-        # Try to find JSON array in output
-        import re
-        json_match = re.search(r'\[.*\]', output, re.DOTALL)
-        if json_match:
-            results = json.loads(json_match.group())
-            if isinstance(results, list):
-                return results
-
-        raise ValueError("No valid JSON array found in Hermes output")
+        results = extract_json_array(output)
+        if results is None or not isinstance(results, list):
+            raise ValueError("No valid JSON array found in Hermes output")
+        return results
 
     except subprocess.TimeoutExpired:
         print(f"[ERROR] Hermes CLI timed out after {LOCAL_LLM_TIMEOUT}s", file=sys.stderr)
@@ -231,11 +323,12 @@ def classify_hermes_llm(articles):
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="LLM-based MBG sentiment classifier")
+    parser = argparse.ArgumentParser(description="MBG sentiment classifier")
     parser.add_argument("input", help="JSON file with scraped articles")
     parser.add_argument("--output", default=None, help="Output JSON file")
-    parser.add_argument("--mode", choices=["local", "hermes"], default="local",
-                        help="LLM mode: local (endpoint) or hermes (Hermes CLI)")
+    parser.add_argument("--mode", choices=["local", "local-model", "hermes"],
+                        default="local",
+                        help="Classifier mode: local (API), local-model (HF pipeline), hermes")
     args = parser.parse_args()
 
     with open(args.input) as f:
@@ -246,54 +339,40 @@ def main():
         print("No articles to process.", file=sys.stderr)
         return 0
 
-    print(f"[LLM] Classifying {len(articles)} articles via {args.mode} LLM...",
+    print(f"[CLASSIFIER] Classifying {len(articles)} articles via {args.mode}...",
           file=sys.stderr)
 
     if args.mode == "local":
         results = classify_local_llm(articles)
+        method = "llm-api"
+        model = LOCAL_LLM_MODEL
+    elif args.mode == "local-model":
+        results = classify_local_model(articles)
+        method = "hf-pipeline"
+        model = HF_MODEL_NAME
     else:
         results = classify_hermes_llm(articles)
+        method = "hermes"
+        model = "hermes"
 
     if results is None:
-        print("[LLM] Classification failed. No output written.", file=sys.stderr)
+        print("[CLASSIFIER] Classification failed. No output written.", file=sys.stderr)
         return 1
 
-    if len(results) != len(articles):
-        print(f"[WARN] Expected {len(articles)} results, got {len(results)}. "
-              f"Padding/truncating.", file=sys.stderr)
-        # Pad or truncate to match
-        while len(results) < len(articles):
-            results.append({"sentiment": "netral"})
-        results = results[:len(articles)]
-
-    # Apply sentiments to articles
-    for a, r in zip(articles, results):
-        sentiment = r.get("sentiment", "netral")
-        if sentiment not in ("positif", "netral", "negatif"):
-            sentiment = "netral"
-        a["sentiment"] = sentiment
-
-    result = {
-        "classified_at": datetime.now().isoformat(),
-        "method": f"llm-{args.mode}",
-        "model": LOCAL_LLM_MODEL if args.mode == "local" else "hermes",
-        "total_articles": len(articles),
-        "articles": articles,
-    }
+    articles = apply_sentiments(articles, results)
+    output = build_output(articles, method, model)
 
     if args.output:
         with open(args.output, "w") as f:
-            json.dump(result, f, indent=2)
+            json.dump(output, f, indent=2)
         print(f"Classified {len(articles)} articles -> {args.output}")
     else:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(output, indent=2))
 
-    # Print summary
     counts = Counter(a["sentiment"] for a in articles)
     print(f"\nSentiment distribution: Positif={counts.get('positif', 0)}, "
           f"Netral={counts.get('netral', 0)}, Negatif={counts.get('negatif', 0)}",
           file=sys.stderr)
-
     return 0
 
 
