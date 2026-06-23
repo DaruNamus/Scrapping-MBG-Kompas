@@ -2,7 +2,11 @@
 
 Penjelasan parameter yang menentukan output sentiment (`positif` / `netral` / `negatif`) di pipeline MBG Scraper.
 
-## Pipeline Overview
+Fokus dokumen ini: **bagaimana classifier bekerja secara internal**. Untuk konfigurasi env vars, CLI flags, arsitektur pipeline, atau troubleshooting, lihat file docs lain.
+
+---
+
+## Overview
 
 ```
 Input (title + body) ──► [Classifier] ──► {id, sentiment}
@@ -15,9 +19,7 @@ Input (title + body) ──► [Classifier] ──► {id, sentiment}
 
 ---
 
-## Parameters per Mode
-
-### 1. Rule-Based (`--classifier rule`)
+## 1. Rule-Based (`--classifier rule`)
 
 | Parameter | Lokasi | Efek |
 |---|---|---|
@@ -31,11 +33,11 @@ Input (title + body) ──► [Classifier] ──► {id, sentiment}
 
 ---
 
-### 2. LLM Local (`--classifier local`)
+## 2. LLM Local (`--classifier local`)
 
 Input dikirim ke LLM via API (vLLM / Ollama / LM Studio). Hasil sepenuhnya tergantung prompt.
 
-#### System Prompt
+### System Prompt
 
 Ada di `llm_classifier.py` — variabel `SYSTEM_PROMPT`.
 
@@ -58,7 +60,7 @@ HANYA 3 label yang valid: positif, netral, negatif.
 | Contoh format dengan `id` + `sentiment` | Menentukan struktur output yang diharapkan |
 | "HANYA 3 label yang valid" | Redundansi untuk mencegah hallucination label baru |
 
-#### User Prompt
+### User Prompt
 
 Dibangun oleh fungsi `build_user_prompt()`:
 
@@ -80,7 +82,7 @@ def build_user_prompt(articles):
 | **Urutan Title → Content** | Bias — LLM cenderung kasih weight lebih ke informasi pertama |
 | **`[i]` index** | LLM pake ini buat `id` di response JSON |
 
-#### Engine Parameters
+### Engine Parameters
 
 Dikirim ke vLLM/Ollama API:
 
@@ -91,7 +93,7 @@ Dikirim ke vLLM/Ollama API:
 | `max_tokens` | `MBG_LLM_MAX_TOKENS` (8192) | Kalau terlalu kecil, JSON bisa terpotong → parse error |
 | `stop` sequences | hardcoded `["\n\n\n"]` | Mencegah LLM lanjut nulis commentary setelah JSON |
 
-#### Post-Processing
+### Post-Processing
 
 ```python
 _JSON_PATTERN = re.compile(r'\[.*?\]', re.DOTALL)
@@ -105,9 +107,11 @@ if match:
 | Regex fallback `\[.*?\]` | Extract JSON dari response yang tercampur teks lain (misal "Thinking Process" dari Qwen reasoning model) |
 | Safe default `{"sentiment": "netral"}` | Artikel yang gagal diparse dianggap netral |
 
+⚠️ **Untuk reasoning models** (Qwen, DeepSeek-R1) yang output "Thinking Process..." sebelum JSON: regex fallback sudah handle. Kalau tetap gagal, cek [troubleshooting.md](troubleshooting.md).
+
 ---
 
-### 3. Local Model (`--classifier local-model`)
+## 3. Local Model (`--classifier local-model`)
 
 Pakai HuggingFace `pipeline("text-classification", ...)` langsung.
 
@@ -115,7 +119,7 @@ Pakai HuggingFace `pipeline("text-classification", ...)` langsung.
 |---|---|---|
 | `model` | `MBG_HF_MODEL` | Arsitektur model (`distilbert`, `roberta`, dll) — menentukan label set native |
 | `device` | `MBG_HF_DEVICE` (`cuda`/`cpu`) | GPU = cepat, CPU = lambat untuk model besar |
-| `batch_size` | `MBG_HF_BATCH_SIZE` (8) | Semakin besar, semakin cepat tapi pakai lebih banyak VRAM |
+| `batch_size` | `MBG_HF_BATCH_SIZE` | Semakin besar, semakin cepat tapi pakai lebih banyak VRAM |
 | `truncation` | hardcoded `512` tokens | Artikel kepanjangan dipotong |
 
 **Label mapping** — model HF punya label native sendiri:
@@ -133,7 +137,7 @@ Pakai HuggingFace `pipeline("text-classification", ...)` langsung.
 
 ---
 
-### 4. Hermes (`--classifier hermes`)
+## 4. Hermes (`--classifier hermes`)
 
 Sama dengan mode `local` secara arsitektur, tapi request dikirim via Hermes agent CLI (`hermes run`) sebagai subprocess.
 
@@ -146,17 +150,6 @@ Sama dengan mode `local` secara arsitektur, tapi request dikirim via Hermes agen
 
 ---
 
-## Decision Table: Mode Selection
-
-| Mode | Akurasi | Kecepatan | GPU Required | Setup |
-|---|---|---|---|---|
-| `rule` | Medium (keyword-dependent) | ✅ Sangat cepat | ❌ Tidak | Zero config |
-| `local` | High (tergantung model) | ⚠️ Sedang (network + inference) | ⚠️ Tergantung LLM server | LLM server running |
-| `local-model` | High (tergantung model) | ✅ Cepat (GPU) / ❌ Lambat (CPU) | ✅ Disarankan | `pip install transformers torch` |
-| `hermes` | High (tergantung model) | ❌ Lambat (overhead CLI) | Tergantung Hermes | Hermes CLI terinstall |
-
----
-
 ## Rekomendasi Tuning
 
 1. **Temperature → 0.1** biar reproducible. Naikkan ke 0.3-0.5 kalau mau lebih nuanced.
@@ -164,3 +157,7 @@ Sama dengan mode `local` secara arsitektur, tapi request dikirim via Hermes agen
 3. **System prompt → definisi label eksplisit**: tambahkan contoh artikel positif/netral/negatif langsung di prompt untuk konsistensi lebih tinggi.
 4. **Model >7B** (Qwen 7B/14B, Llama 8B) — konsistensi label jauh lebih baik daripada model <3B.
 5. **Coba mode `local` dulu** sebelum `local-model` — lebih fleksibel dan gampang debug.
+
+---
+
+> **Lihat juga:** [Architecture](architecture.md) | [Configuration](configuration.md) | [Troubleshooting](troubleshooting.md)
